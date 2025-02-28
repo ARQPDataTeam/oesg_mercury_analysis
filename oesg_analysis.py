@@ -83,7 +83,7 @@ fig,ax=plt.subplots(figsize=(12,8))
 
 master_monthly_df.boxplot(ax=ax)
 ax.set_title(species+' Monthly Box Plot for: '+ipcc_region)
-ax.set_ylabel('Concentration ($u$gm$\mathregular{^3}$)')
+ax.set_ylabel('Concentration (ngm$\mathregular{^3}$)')
 ax.set_xlabel('Month')
 ax.yaxis.grid(True, which='major', linestyle='-', linewidth=0.25)
 ax.xaxis.grid(False)
