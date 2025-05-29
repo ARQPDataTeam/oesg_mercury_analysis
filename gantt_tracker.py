@@ -24,15 +24,16 @@ species = 'TM - Wet Deposition'
 sql_data_query = """
                 set time zone GMT;
                 select distinct on (site) site, country, min(datetime), max(datetime) from all__hgee_v2 where datetime > '2010-01-01' and matrix = 'precip' GROUP BY (site,country); 
-            """
+            """.format(matrix)
 
 
 with sql_engine.connect() as conn:
 # create the dataframes from the sql query
     gantt_mercury_tracking_dataframe = pd.read_sql_query(sql_data_query, conn)
 
-gantt_mercury_tracking_dataframe.columns = ['Site', 'Country', 'Start Date', 'End Date']
 
+
+gantt_mercury_tracking_dataframe.columns = ['Site', 'Country', 'Start Date', 'End Date']
 gantt_mercury_tracking_dataframe['Site'] = gantt_mercury_tracking_dataframe['Site']+' '+gantt_mercury_tracking_dataframe['Country']
 gantt_mercury_tracking_dataframe.drop(columns=['Country'], inplace=True)
 gantt_mercury_tracking_dataframe.set_index('Site',drop=True, inplace=True)
@@ -40,13 +41,13 @@ gantt_mercury_tracking_dataframe.sort_values(by=['End Date'], inplace=True)
 print (gantt_mercury_tracking_dataframe)
 
 
-if species=='aerosol':
+if species=='PBM':
     fig_size=(20,14)
 elif species=='GEM':
     fig_size=(20,16)
 elif species=='GOM':
     fig_size=(20,6)
-elif species=='TM - Wet Deposition':
+elif species=='total_mercury':
     fig_size=(20,10)
 elif species=='TGM':
     fig_size=(20,14)

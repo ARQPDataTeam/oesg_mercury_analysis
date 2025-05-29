@@ -7,7 +7,7 @@ from datetime import datetime as dt
 import seaborn as sns
 
 # grab the passives data from the excel sheet
-passives_df=pd.read_csv('\\econm3hwvfsp008.ncr.int.ec.gc.ca/arqp_data/Projects/OnGoing/Mercury/HGEE-Minamata/Data/Passives/data_files/original_format/EC_Global_Passives_2025-03-25.csv',skiprows=114, usecols=['SiteName', 'Country', 'Site_code', 'StartDate, YYYY-MM-DD',
+passives_df=pd.read_csv('\\\econm3hwvfsp008.ncr.int.ec.gc.ca/arqp_data/Projects/OnGoing/Mercury/HGEE-Minamata/Data/Passives/data_files/original_format/EC_Global_Passives_2025-03-25.csv',skiprows=114, usecols=['SiteName', 'Country', 'Site_code', 'StartDate, YYYY-MM-DD',
        'StartTime HH:MM:SS (24hr)', 'EndDate YYYY-MM-DD', 'EndTime, hh:mm:ss',
        'Year YYYY', 'Quarter', 'MetAdj_GEM ng/m^3', 'GEM, ng m/m^3', 'Flag'])
 # print (passives_df.columns)
