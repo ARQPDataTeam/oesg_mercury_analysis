@@ -13,17 +13,18 @@ import pandas as pd
 #matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 plt.ion()
-import psycopg2, psycopg2.extras
-import gc, re
 import pymannkendall as mk
 from sqlalchemy import create_engine, text
 import geopandas as gp
-import os
 import matplotlib.dates as md
+from shapely import Point
+from shapely.geometry import box 
+import matplotlib as mpl
+from scipy import stats
+
 
 # local module import
 from credentials import sql_engine_string_generator
-
 
 ################## SQL database stuff ##############################
 
@@ -352,11 +353,248 @@ def gantt_plotter(sql_engine):
         plt.savefig('\\\econm3hwvfsp008.ncr.int.ec.gc.ca/arqp_data/Projects/OnGoing/Mercury/HGEE-Minamata/Results and Plots/gantt-plot_'+species+'.png')
         plt.close()
    
+def monthly_timeseries(sql_engine):
+    # set the sql query
+    sql_data_query = """
+        SET TIME ZONE 'GMT'; 
+        SELECT 
+            site, ipcc_region,
+            date_trunc('month', datetime) AS month,
+            AVG(concentration) AS monthly_mean
+        FROM 
+            hgee_active
+        WHERE 
+            species IN ('TGM', 'GEM')
+            AND datetime > '2000-01-01'
+        GROUP BY 
+            site, ipcc_region, date_trunc('month', datetime)
+        ORDER BY 
+            site, month;
+    """
 
+    with sql_engine.connect() as conn:
+        mercury_df = pd.read_sql_query(sql_data_query, conn)
 
+    # Replace bad values with NaN
+    mercury_df.replace({'monthly_mean': {999: np.nan, 999.999: np.nan}}, inplace=True)
 
+    # Ensure datetime
+    mercury_df['month'] = pd.to_datetime(mercury_df['month'])
 
+    # Get unique regions
+    regions = mercury_df['ipcc_region'].dropna().unique()
 
+    for region in regions:
+        region_df = mercury_df[mercury_df['ipcc_region'] == region]
+
+        fig, ax = plt.subplots(figsize=(14, 5))
+
+        for site, group in region_df.groupby('site'):
+            ax.plot(group['month'], group['monthly_mean'], label=site)
+
+        ax.set_title(f'Monthly Mean Mercury Concentration – {region}')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Concentration')
+        ax.legend(title='Site', loc='center left', bbox_to_anchor=(1.01, 0.5))
+
+        plt.tight_layout(rect=[0, 0, 0.85, 1])
+
+        # Sanitize region name for filenames
+        safe_region = region.replace(" ", "_").replace("/", "_")
+
+        # Define full output path
+        output_path = f"\\\\econm3hwvfsp008.ncr.int.ec.gc.ca\\arqp_data\\Projects\\OnGoing\\Mercury\\HGEE-Minamata\\Results and Plots\\global_mean_timeseries_{safe_region}.png"
+        
+        plt.savefig(output_path)
+        plt.close(fig)  # close the figure to free memory
+
+# a global concentration plotter
+def global_plotter(sql_engine):
+    # Run SQL and load into pandas
+    sql_query = """
+    SELECT 
+        site, 
+        latdecd, 
+        londecd, 
+        AVG(concentration) AS mean_concentration
+    FROM 
+        hgee_active
+    WHERE 
+        species in ('TGM', 'GEM')
+    and
+        datetime > '2020-01-01'    GROUP BY 
+        site, latdecd, londecd;
+    """
+
+    with sql_engine.connect() as conn:
+        df = pd.read_sql_query(sql_query, conn)
+
+    # Replace bad values
+    df['mean_concentration'] = df['mean_concentration'].replace([999, 999.999], pd.NA)
+
+    # Drop rows with NA
+    df = df.dropna(subset=['mean_concentration', 'latdecd', 'londecd'])
+
+    # Convert degrees to radians for Winkel-Tripel projection
+    df['lon_rad'] = np.radians(df['londecd'])
+    df['lat_rad'] = np.radians(df['latdecd'])
+
+    # Create geometry column for geopandas
+    gdf = gp.GeoDataFrame(df, 
+                        geometry=gp.points_from_xy(df['londecd'], df['latdecd']),
+                        crs='EPSG:4326')  # WGS84
+
+    # Step 4: Reproject to Winkel-Tripel (ESRI:54042)
+    gdf_winkel = gdf.to_crs('ESRI:54042')
+
+    # Load world map
+    world = gp.read_file("https://naturalearth.s3.amazonaws.com/110m_cultural/ne_110m_admin_0_countries.zip")
+    world = world.to_crs('ESRI:54042')
+
+    # Get value range for color normalization
+    vmin = gdf_winkel['mean_concentration'].min()
+    vmax = gdf_winkel['mean_concentration'].max()
+    norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+    cmap = plt.get_cmap('turbo')
+
+    # Start plotting
+    fig, ax = plt.subplots(figsize=(16, 10))
+
+    # Plot world polygons
+    world.plot(ax=ax, color='peru', edgecolor='dimgray', linewidth=0.5, zorder=2)
+
+    # Plot mercury data points
+    gdf_winkel.plot(
+        ax=ax,
+        column='mean_concentration',
+        cmap=cmap,
+        norm=norm,
+        markersize=40,
+        edgecolor='k',
+        linewidth=0.2,
+        alpha=0.9,
+        legend=False
+    )
+
+    # Set axis limits to world extent in Winkel-Tripel
+    ax.set_xlim(world.total_bounds[[0, 2]])
+    ax.set_ylim(world.total_bounds[[1, 3]])
+    ax.set_axis_off()
+
+    # Add colorbar
+    sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm._A = []
+    cbar = fig.colorbar(sm, ax=ax, orientation='vertical', fraction=0.03, pad=0.04, aspect=20)
+    cbar.ax.set_title("Hg\n[ng/m³]", fontsize=10)
+    cbar.ax.tick_params(labelsize=8)
+
+    # Reduce vertical extent of colorbar
+    scale_box = cbar.ax.get_position()
+    # Compute new height
+    new_height = scale_box.height * 0.5
+
+    # Adjust y-position to keep it centered
+    new_y0 = scale_box.y0 + (scale_box.height - new_height) / 2
+
+    # Set new position
+    cbar.ax.set_position([scale_box.x0, new_y0, scale_box.width, new_height])
+
+    # Final title
+    ax.set_title('Global Mean Active TGM/GEM Concentrations (Post-2020)', fontsize=14)
+    # plt.tight_layout()
+    # plt.subplots_adjust(left=0.1, right=0.9, bottom=0.2, top=0.8, )
+    plt.show()
+    plt.savefig('\\\econm3hwvfsp008.ncr.int.ec.gc.ca/arqp_data/Projects/OnGoing/Mercury/HGEE-Minamata/Results and Plots/global_averages.png')
+
+def time_delta_by_site(sql_engine):
+    # grab the sites and frequencies from the sites table
+    site_sql_query = """
+                    SELECT distinct sites.site, sites.freq
+                    FROM sites
+                    JOIN hgee_active ON sites.site = hgee_active.site
+                    WHERE sites.freq IS NOT NULL
+                    AND hgee_active.datetime > '1999-12-31'
+                    and hgee_active.species in ('TGM','GEM')
+                    order by site;
+                    """
+
+    # grab the list of sites and frequencies
+    with sql_engine.connect() as conn:
+        sites_df = pd.read_sql_query(site_sql_query, conn)
+        
+    # set the index to the sites
+    sites_df.set_index(sites_df['site'], drop=True, inplace=True)
+
+    compliance_df = pd.DataFrame(index=sites_df.index,columns=['total_time','non_compliance_time','compliance_fraction'])
+    
+    for site in sites_df.index:
+        print (site)
+
+         # grab the datetimes from each site
+        sql_query = """
+                    select datetime from hgee_active 
+                    where concentration is not null
+                    and datetime > '1999-12-31'
+                    and species in ('TGM','GEM')
+                    and site = '{}'
+                    order by datetime;
+                    """.format(site)
+        with sql_engine.connect() as conn:
+            datetimes_df = pd.read_sql_query(sql_query, conn)
+        
+        # set the datetime column to a datetime column
+        datetimes_df['datetime'] = pd.to_datetime(datetimes_df['datetime'])
+
+        # calculate the delta_t between measurements
+        datetimes_df['delta_t'] = datetimes_df['datetime'].diff()
+
+        # Convert to hours (or minutes/seconds if desired)
+        datetimes_df['delta_t_hours'] = datetimes_df['delta_t'].dt.total_seconds() / 3600
+
+        # Drop NaNs from the first row (diff produces NaN at index 0)
+        delta_hours = datetimes_df['delta_t_hours'].dropna()
+
+        # Compute the mode of delta_hours
+        mode_delta = stats.mode(delta_hours, keepdims=True)[0][0]
+
+        # Set tolerance as a fraction of the mode (15%)
+        tolerance = 0.15
+
+        # Identify values outside the tolerance range
+        non_mode_mask = np.abs(delta_hours - mode_delta) > tolerance*mode_delta
+
+        # Get the indices of these "non-mode" delta_t values
+        non_mode_indices = delta_hours[non_mode_mask].index
+
+        # Filter original DataFrame to see those rows
+        deviations_df = datetimes_df.loc[non_mode_indices]
+
+        # sum up the 'non-compliance time'
+        non_compliance_time=datetimes_df.loc[non_mode_indices,'delta_t_hours'].sum()
+
+        total_time = (datetimes_df.loc[datetimes_df.index[-1], 'datetime'] - datetimes_df.loc[datetimes_df.index[0], 'datetime']).total_seconds() / 3600
+
+        # print (total_time)
+        # print (non_compliance_time)
+
+        compliance_df.loc[site,['total_time','non_compliance_time','compliance_fraction']] = total_time,non_compliance_time,non_compliance_time/total_time
+
+        # # Plot histogram
+        # plt.figure(figsize=(10, 6))
+        # n, bins, patches = plt.hist(delta_hours, bins=50, color='skyblue', edgecolor='black')
+
+        # plt.title('Histogram of Δt (Time Between Measurements)')
+        # plt.xlabel('Δt (hours)')
+        # plt.ylabel('Frequency')
+        # plt.grid(True)
+        # plt.tight_layout()
+        # plt.show()
+        # plt.savefig('\\\econm3hwvfsp008.ncr.int.ec.gc.ca/arqp_data/Projects/OnGoing/Mercury/HGEE-Minamata/Results and Plots/delta_t_'+site+'.png')
+
+    # print (compliance_df)
+
+    # save the compliance dataframe
+    compliance_df.to_csv('\\\econm3hwvfsp008.ncr.int.ec.gc.ca/arqp_data/Projects/OnGoing/Mercury/HGEE-Minamata/Results and Plots/measurement_frequency_compliance.csv')
 
 # # run the global average
 # global_site_average(sql_engine)
@@ -374,7 +612,16 @@ def gantt_plotter(sql_engine):
 # freq_insert(sql_engine)
 
 # run the coverage calculator
-coverage_calculator(sql_engine)
+# coverage_calculator(sql_engine)
 
 # run the gantt plotter
 # gantt_plotter(sql_engine)
+
+# run the monthly timeseries
+# monthly_timeseries(sql_engine)
+
+# run the global plotter
+# global_plotter(sql_engine)
+
+# run a histogram of the typical delta t for each site
+time_delta_by_site(sql_engine)

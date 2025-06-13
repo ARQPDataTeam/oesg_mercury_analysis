@@ -15,7 +15,6 @@ shapely
 seaborn
 geopandas[all]
 pymannkendall
-
-
+scipy
 
 
