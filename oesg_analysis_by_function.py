@@ -996,11 +996,6 @@ def ebas_precip_assimilation():
 def minamata_wet_dep_analysis():
     mercury_df = pd.read_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\minamata_wet_deposition_all_sites.csv') # don't index the first column yet
 
-    # # set up a blank dataframe to house all the stats data
-    # year_list = list(range(2010, 2025))
-    # stats_columns = [f"{year}_{stat}" for year in year_list for stat in ['wght_mn', 'std_dev', 'min', '5_p', '25_p', 'med', '75_p', '95_p', 'max']]
-    # deposition_stats_df = pd.DataFrame(columns=stats_columns, index=mercury_df['station_name'].unique())
-
     # clean up incorrect flags
     mercury_df.loc[mercury_df['Hg']==-999.0,'flag'] = 'C'
     mercury_df.loc[mercury_df['deposition']==-999.0,'flag'] = 'C'
