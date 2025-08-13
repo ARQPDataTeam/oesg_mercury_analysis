@@ -1029,121 +1029,121 @@ def minamata_wet_dep_analysis():
         if station_df.index.max() < pd.Timestamp('2016-01-01'):
             continue
 
-        # # Pre-calculate log values
-        # station_df = station_df[(station_df['Hg'] > 0) & (station_df['mm'] > 0)]
-        # station_df['log_mm'] = np.log(station_df['mm'])
-        # station_df['log_Hg'] = np.log(station_df['Hg'])
+        # Pre-calculate log values
+        station_df = station_df[(station_df['Hg'] > 0) & (station_df['mm'] > 0)]
+        station_df['log_mm'] = np.log(station_df['mm'])
+        station_df['log_Hg'] = np.log(station_df['Hg'])
 
 
-        # def safe_linreg(g):
-        #     try:
-        #         slope, intercept, *_ = linregress(g['log_mm'], g['log_Hg'])
-        #         return pd.Series({'slope': slope, 'intercept': intercept})
-        #     except ValueError as e:
-        #         print(f"Regression failed for station: {station}, month: {g.name}, reason: {e}")
-        #         return pd.Series({'slope': np.nan, 'intercept': np.nan})
-        #         # Step 1: Compute slope and intercept per month (across all years)
-        # monthly_models = (
-        #     station_df.groupby('month')
-        #     .apply(safe_linreg, include_groups=False)
-        # )
+        def safe_linreg(g):
+            try:
+                slope, intercept, *_ = linregress(g['log_mm'], g['log_Hg'])
+                return pd.Series({'slope': slope, 'intercept': intercept})
+            except ValueError as e:
+                print(f"Regression failed for station: {station}, month: {g.name}, reason: {e}")
+                return pd.Series({'slope': np.nan, 'intercept': np.nan})
+                # Step 1: Compute slope and intercept per month (across all years)
+        monthly_models = (
+            station_df.groupby('month')
+            .apply(safe_linreg, include_groups=False)
+        )
 
-        # monthly_models.index.name = 'month'
-        # monthly_models = monthly_models.reset_index()
+        monthly_models.index.name = 'month'
+        monthly_models = monthly_models.reset_index()
 
-        # # store the original index
-        # original_index = station_df.index
+        # store the original index
+        original_index = station_df.index
 
-        # # Step 2: Map slope/intercept to each row based on month
-        # station_df = station_df.merge(monthly_models, on='month', how='left')
+        # Step 2: Map slope/intercept to each row based on month
+        station_df = station_df.merge(monthly_models, on='month', how='left')
 
-        # # Restore datetime index
-        # station_df.index = original_index
+        # Restore datetime index
+        station_df.index = original_index
 
-        # # Step 3: Compute predicted log(Hg), residuals, and weighted residuals
-        # station_df['log_Hg_pred'] = station_df['slope'] * station_df['log_mm'] + station_df['intercept']
-        # station_df['residual'] = station_df['log_Hg'] - station_df['log_Hg_pred']
-        # station_df['weighted_residual'] = station_df['residual'] * station_df['mm']
+        # Step 3: Compute predicted log(Hg), residuals, and weighted residuals
+        station_df['log_Hg_pred'] = station_df['slope'] * station_df['log_mm'] + station_df['intercept']
+        station_df['residual'] = station_df['log_Hg'] - station_df['log_Hg_pred']
+        station_df['weighted_residual'] = station_df['residual'] * station_df['mm']
 
-        # # Map month numbers to 3-letter names
-        # month_map = {
-        #     1: 'residual_jan', 2: 'residual_feb', 3: 'residual_mar', 4: 'residual_apr',
-        #     5: 'residual_may', 6: 'residual_jun', 7: 'residual_jul', 8: 'residual_aug',
-        #     9: 'residual_sep', 10: 'residual_oct', 11: 'residual_nov', 12: 'residual_dec'
-        # }
+        # Map month numbers to 3-letter names
+        month_map = {
+            1: 'residual_jan', 2: 'residual_feb', 3: 'residual_mar', 4: 'residual_apr',
+            5: 'residual_may', 6: 'residual_jun', 7: 'residual_jul', 8: 'residual_aug',
+            9: 'residual_sep', 10: 'residual_oct', 11: 'residual_nov', 12: 'residual_dec'
+        }
 
-        # # Create a new column name for each row based on its month
-        # station_df['residual_col'] = station_df['month'].map(month_map)
+        # Create a new column name for each row based on its month
+        station_df['residual_col'] = station_df['month'].map(month_map)
 
-        # # Create wide-format DataFrame where each row has weighted_residual in the correct month column
-        # residual_wide = pd.pivot_table(
-        #     station_df[['weighted_residual', 'residual_col']],
-        #     index=station_df.index,
-        #     columns='residual_col',
-        #     values='weighted_residual'
-        # )
+        # Create wide-format DataFrame where each row has weighted_residual in the correct month column
+        residual_wide = pd.pivot_table(
+            station_df[['weighted_residual', 'residual_col']],
+            index=station_df.index,
+            columns='residual_col',
+            values='weighted_residual'
+        )
 
-        # # do a monthly average for each station for each year
-        # # Group by year and month, then take the average of weighted_residual
-        # monthly_avg = (
-        #     station_df
-        #     .groupby(['year', 'month'])['weighted_residual']
-        #     .mean()
-        #     .reset_index()
-        # )
+        # do a monthly average for each station for each year
+        # Group by year and month, then take the average of weighted_residual
+        monthly_avg = (
+            station_df
+            .groupby(['year', 'month'])['weighted_residual']
+            .mean()
+            .reset_index()
+        )
 
-        # # Map numeric month to named columns
-        # monthly_avg['month_name'] = monthly_avg['month'].map(month_map)
+        # Map numeric month to named columns
+        monthly_avg['month_name'] = monthly_avg['month'].map(month_map)
 
-        # # Pivot to wide format: year as index, month columns as values
-        # monthly_avg_pivot = (
-        #     monthly_avg
-        #     .pivot(index='year', columns='month_name', values='weighted_residual')
-        #     .sort_index()
-        # )
+        # Pivot to wide format: year as index, month columns as values
+        monthly_avg_pivot = (
+            monthly_avg
+            .pivot(index='year', columns='month_name', values='weighted_residual')
+            .sort_index()
+        )
 
-        # # (Optional) ensure all 12 columns are present in case some months are missing
-        # for col in month_map.values():
-        #     if col not in monthly_avg_pivot.columns:
-        #         monthly_avg_pivot[col] = np.nan
+        # (Optional) ensure all 12 columns are present in case some months are missing
+        for col in month_map.values():
+            if col not in monthly_avg_pivot.columns:
+                monthly_avg_pivot[col] = np.nan
 
-        # # Reorder columns to ensure Jan–Dec order
-        # monthly_avg_pivot = monthly_avg_pivot[month_map.values()]
-        # monthly_avg_pivot = monthly_avg_pivot.reset_index()
-        # monthly_avg_pivot['year'] = monthly_avg_pivot['year'].astype(str)  # index now object/string
-        # monthly_avg_pivot.set_index('year', inplace=True)        
+        # Reorder columns to ensure Jan–Dec order
+        monthly_avg_pivot = monthly_avg_pivot[month_map.values()]
+        monthly_avg_pivot = monthly_avg_pivot.reset_index()
+        monthly_avg_pivot['year'] = monthly_avg_pivot['year'].astype(str)  # index now object/string
+        monthly_avg_pivot.set_index('year', inplace=True)        
 
-        # mk_results = {} # set up a mk results dictionary
+        mk_results = {} # set up a mk results dictionary
 
-        # for col in monthly_avg_pivot.columns:
-        #     series = monthly_avg_pivot[col].dropna()
-        #     if len(series) >= 3:
-        #         result = mk.original_test(series)
-        #         mk_results[col] = {
-        #             'slope': result.slope,
-        #             'p': result.p,
-        #             'trend': result.trend
-        #         }
-        #     else:
-        #         mk_results[col] = {
-        #             'slope': np.nan,
-        #             'p': np.nan,
-        #             'trend': 'insufficient'
-        #         }
+        for col in monthly_avg_pivot.columns:
+            series = monthly_avg_pivot[col].dropna()
+            if len(series) >= 3:
+                result = mk.original_test(series)
+                mk_results[col] = {
+                    'slope': result.slope,
+                    'p': result.p,
+                    'trend': result.trend
+                }
+            else:
+                mk_results[col] = {
+                    'slope': np.nan,
+                    'p': np.nan,
+                    'trend': 'insufficient'
+                }
 
-        # # Turn into DataFrame: rows = slope, p, trend
-        # mk_df = pd.DataFrame(mk_results) 
+        # Turn into DataFrame: rows = slope, p, trend
+        mk_df = pd.DataFrame(mk_results) 
 
-        # # Reindex MK result so it becomes part of the same structure
-        # mk_df.index.name = 'year'  # mimic index name
-        # monthly_avg_pivot = pd.concat([monthly_avg_pivot, mk_df])
+        # Reindex MK result so it becomes part of the same structure
+        mk_df.index.name = 'year'  # mimic index name
+        monthly_avg_pivot = pd.concat([monthly_avg_pivot, mk_df])
 
-        # # Join these new columns back to the original station_df
-        # station_df = pd.concat([station_df, residual_wide], axis=1)
+        # Join these new columns back to the original station_df
+        station_df = pd.concat([station_df, residual_wide], axis=1)
 
-        # # save each station_df to file for examination
-        # station_df.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition_table_'+station+'.csv')
-        # monthly_avg_pivot.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition_MK_results_'+station+'.csv')
+        # save each station_df to file for examination
+        station_df.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition_table_'+station+'.csv')
+        monthly_avg_pivot.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition_MK_results_'+station+'.csv')
     
         def annual_stats_func(g):
             mm_sum = g['mm'].sum()
