@@ -16,7 +16,8 @@ import matplotlib.pyplot as plt
 plt.ion()
 import pymannkendall as mk
 from pymannkendall import original_test  # original MK
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, update, Table, MetaData, func, insert
+from sqlalchemy.exc import SQLAlchemyError
 import geopandas as gp
 import matplotlib.dates as md
 from shapely import Point
@@ -28,6 +29,8 @@ import os
 import re
 import shutil
 from collections import defaultdict
+from libpysal.weights import KNN
+from esda.moran import Moran
 
 
 
@@ -771,7 +774,7 @@ def ebas_precip_assimilation_merge():
                     start_date_str = line.split(':', 1)[1].strip()
                     start_date = dt.strptime(start_date_str, '%Y%m%d%H%M%S')
                 if 'Station name:' in line:
-                    station_name = line.split(':', 1)[1].strip()
+                    site_name = line.split(':', 1)[1].strip()
                 if 'starttime' in line:
                     # print (i)
                     break
@@ -779,12 +782,12 @@ def ebas_precip_assimilation_merge():
         # print (df.columns)
         df.set_index(index_col, drop=False, inplace=True)
         
-        return df,start_date,start_date.strftime('%Y%m%d'),station_name
+        return df,start_date,start_date.strftime('%Y%m%d'),site_name
 
     # Step 4: Process file pairs
-    # set up a dictionary for each station name to list the corresponding start date strings
+    # set up a dictionary for each site name to list the corresponding start date strings
     # Initialize the dictionary
-    station_dates_dict = defaultdict(list)
+    site_dates_dict = defaultdict(list)
     merged_dfs = [] # a merged dataframe for each matching pair
     start_date_list = [] # a start date list
     for key in sorted(common_substrings):
@@ -794,27 +797,27 @@ def ebas_precip_assimilation_merge():
         # print(f"Processing pair:\n  Mercury: {mercury_path}\n  Precip : {precip_path}")
 
         try:
-            mercury_df,start_date,start_date_str,station_name = read_ames_file(
+            mercury_df,start_date,start_date_str,site = read_ames_file(
                 mercury_path,
-                usecols=['starttime', 'endtime', 'Hg', 'flag_Hg']
+                usecols=['starttime', 'endtime', 'concentration', 'flag_Hg']
             )
-            precip_df,start_date,start_date_str,station_name = read_ames_file(
+            precip_df,start_date,start_date_str,site = read_ames_file(
                 precip_path,
                 usecols=['starttime', 'endtime', 'mm', 'flag_mm']
             )
-            # print (station_name)
+            # print (site)
             # paired_dfs.append((mercury_df, precip_df))
             
         except Exception as e:
             print(f"❌ Failed to process {key}: {e}")
 
-        # Append start_date_str to the list for the corresponding station
-        station_dates_dict[station_name].append(start_date_str)
+        # Append start_date_str to the list for the corresponding site
+        site_dates_dict[site].append(start_date_str)
 
         start_date_list.append(start_date_str)
         # loop through the paired dfs and merge on the common index
         try:
-            print (station_name,start_date_str)
+            print (site,start_date_str)
             merged = pd.merge(
                 mercury_df,
                 precip_df,
@@ -823,7 +826,7 @@ def ebas_precip_assimilation_merge():
                 right_index=True,
                 suffixes=('_hg', '_precip')  # helps avoid column name conflicts
             )
-            merged.insert(0, 'station_name', station_name)  # Add to first column
+            merged.insert(0, 'site', site)  # Add to first column
             merged.index = pd.to_datetime([start_date + timedelta(days=d) for d in merged.index])
 
             # modify the datetime columns to datetime objects
@@ -839,16 +842,16 @@ def ebas_precip_assimilation_merge():
             merged_dfs.append(merged)
 
         except Exception as e:
-            print(f"❌ Failed to merge {station_name}: {e}")
+            print(f"❌ Failed to merge {site}: {e}")
        
     # concatenate all the merged dfs into one merged_df with all the stations
     full_merged_df=pd.concat(merged_dfs)
     full_merged_df.drop(columns=['starttime_hg', 'endtime_hg' ], inplace=True)
 
     # redo the column names to match the dual ames files
-    desired_order = ['station_name', 'starttime_precip', 'endtime_precip', 'mm', 'Hg', 'flag']
+    desired_order = ['site', 'starttime_precip', 'endtime_precip', 'mm', 'concentration', 'flag']
     full_merged_df = full_merged_df.reindex(columns=desired_order)    # reoder the columns
-    full_merged_df.columns = ['station_name', 'starttime', 'endtime', 'mm', 'Hg', 'flag']
+    full_merged_df.columns = ['site', 'starttime', 'endtime', 'mm', 'concentration', 'flag']
 
     # insert a sample duration and deposition rate column
 
@@ -859,11 +862,11 @@ def ebas_precip_assimilation_merge():
     duration_days.replace(0, np.nan, inplace=True)
 
     # Calculate deposition rate
-    full_merged_df['deposition'] = full_merged_df['mm'] * full_merged_df['Hg'] / duration_days * 7
+    full_merged_df['deposition'] = full_merged_df['mm'] * full_merged_df['concentration'] / duration_days * 7
  
 
     # split the full df into station dfs and save to file:
-    for station, station_df in full_merged_df.groupby('station_name'):
+    for station, station_df in full_merged_df.groupby('site'):
          station_df.to_csv(r'C:/Users/firanskib/OneDrive - EC-EC/mercury/ames_format/dep_data_merged_'+station+'_'+station_dates_dict[station][0]+'.csv',index=True)
 
 def ebas_precip_assimilation():
@@ -893,7 +896,7 @@ def ebas_precip_assimilation():
             elif key_lower == 'numflag precipitation_amount':
                 mapping[key] = 'flag_mm'
             elif key_lower == 'mercury':
-                mapping[key] = 'Hg'
+                mapping[key] = 'concentration'
             elif key_lower == 'numflag mercury':
                 mapping[key] = 'flag_Hg'
             elif key_lower == 'numflag':
@@ -904,13 +907,13 @@ def ebas_precip_assimilation():
 
         # Step 5: Extract metadata like Startdate and Station name
         start_date = None
-        station_name = None
+        site = None
         for line in lines:
             if 'Startdate:' in line:
                 start_date_str = line.split(':', 1)[1].strip()
                 start_date = dt.strptime(start_date_str, '%Y%m%d%H%M%S')
             if 'Station name:' in line:
-                station_name = line.split(':', 1)[1].strip()
+                site = line.split(':', 1)[1].strip()
 
         # Step 6: Find where the actual data starts (look for line containing 'starttime')
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -933,10 +936,10 @@ def ebas_precip_assimilation():
         df.set_index(index_col, drop=False, inplace=True)
 
         # set a common flag column from the HG flag
-        if usecols == ['starttime', 'endtime', 'mm', 'flag_mm', 'Hg', 'flag_Hg']:
+        if usecols == ['starttime', 'endtime', 'mm', 'flag_mm', 'concentration', 'flag_Hg']:
             df = df.rename(columns={'flag_Hg': 'flag'})
             df.drop(columns='flag_mm',inplace=True)
-        return df, start_date, start_date.strftime('%Y%m%d'), station_name
+        return df, start_date, start_date.strftime('%Y%m%d'), site
     
     # Step 4: Process files 
     # set up a dictionary for each station name to list the corresponding start date strings
@@ -951,17 +954,17 @@ def ebas_precip_assimilation():
 
     for file in files:
         try:
-            mercury_df,start_date,start_date_str,station_name = read_ames_file(file)
+            mercury_df,start_date,start_date_str,site = read_ames_file(file)
 
             # Append start_date_str to the list for the corresponding station
-            station_dates_dict[station_name].append(start_date_str)
+            station_dates_dict[site].append(start_date_str)
 
         except Exception as e:
             print(f"❌ Failed to process {file}: {e}")
         start_date_list.append(start_date_str)
         # loop through the paired dfs and merge on the common index
         try:
-            mercury_df.insert(0, 'station_name', station_name)  # Add to first column
+            mercury_df.insert(0, 'site', site)  # Add to first column
             mercury_df.index = pd.to_datetime([start_date + timedelta(days=d) for d in mercury_df.index])
             # adjust time columns to datetimes
             mercury_df['starttime'] = mercury_df['starttime'].apply(lambda x: start_date + timedelta(days=x))
@@ -970,7 +973,7 @@ def ebas_precip_assimilation():
             mercury_dfs.append(mercury_df)
 
         except Exception as e:
-            print(f"❌ Failed to merge {station_name}: {e}")
+            print(f"❌ Failed to merge {site}: {e}")
        
     # concatenate all the merged dfs into one merged_df with all the stations
     full_merged_df=pd.concat(mercury_dfs)
@@ -984,30 +987,251 @@ def ebas_precip_assimilation():
     duration_days.replace(0, np.nan, inplace=True)
 
     # Calculate deposition rate
-    full_merged_df['deposition'] = full_merged_df['mm'] * full_merged_df['Hg'] / duration_days * 7
+    full_merged_df['deposition'] = full_merged_df['mm'] * full_merged_df['concentration'] / duration_days * 7
     
 
     # split the full df into station dfs and save to file:
-    for station, station_df in full_merged_df.groupby('station_name'):
+    for station, station_df in full_merged_df.groupby('site'):
         print (station,station_df.columns)
         # print (station_dates_dict[station],station_dates_dict[station][0])
         station_df.to_csv(r'C:/Users/firanskib/OneDrive - EC-EC/mercury/ames_format/dep_data_'+station+'_'+station_dates_dict[station][0]+'.csv',index=True)
 
-def minamata_wet_dep_analysis():
-    mercury_df = pd.read_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\minamata_wet_deposition_all_sites.csv') # don't index the first column yet
+def minamata_wet_dep_stats():
+    mercury_df = pd.read_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition.csv') # don't index the first column yet
 
-    # clean up incorrect flags
-    mercury_df.loc[mercury_df['Hg']==-999.0,'flag'] = 'C'
+    # set up a blank dataframe to house all the stats data
+    year_list = list(range(2010, 2025))
+    stats_columns = [f"{year}_{stat}" for year in year_list for stat in ['wght_mn', 'std_dev', 'min', '5_p', '25_p', 'med', '75_p', '95_p', 'max']]
+    deposition_stats_df = pd.DataFrame(columns=stats_columns, index=mercury_df['site'].unique())
+
+    # clean up data
+    mercury_df.loc[mercury_df['concentration']==-999.0,'flag'] = 'C'
     mercury_df.loc[mercury_df['deposition']==-999.0,'flag'] = 'C'
     mercury_df.loc[mercury_df['mm']==-999.0,'flag'] = 'C'
     # filter out the missing entries to NaNs
-    mercury_df.loc[mercury_df['flag'].isin(['C',0.89,0.78,0.783]), ['mm','Hg','deposition']] = [np.nan,np.nan,np.nan]
+    mercury_df.loc[mercury_df['flag'].isin(['C',0.89,0.78,0.783]), ['mm','concentration','deposition']] = [np.nan,np.nan,np.nan]
 
     # print(mercury_df.loc[mercury_df['mm'] < 0, ['datetime', 'mm']])
-    # print(mercury_df.loc[mercury_df['Hg'] < 0, ['datetime', 'deposition']])
+    # print(mercury_df.loc[mercury_df['concentration'] < 0, ['datetime', 'deposition']])
+    
+    # set a blank list of stats dataframes
+    all_site_stats = []
+
+    # set up a list of residual series for each site
+    residuals = []
+
+    # do analysis for each site sub_df
+    for site, site_df in mercury_df.groupby('site'):
+        print(site)
+
+        site_df = site_df.copy()
+        site_df.set_index('datetime', drop=True, inplace=True)
+        site_df.index = pd.to_datetime(site_df.index, errors='coerce')
+        site_df['month'] = site_df.index.month
+        site_df['year'] = site_df.index.year
+        # skip sites with too short a data length
+        if site_df.index.max() < pd.Timestamp('2016-01-01'):
+            continue
+
+        # # Pre-calculate log values
+        # site_df = site_df[(site_df['concentration'] > 0) & (site_df['mm'] > 0)]
+        # site_df['log_mm'] = np.log(site_df['mm'])
+        # site_df['log_Hg'] = np.log(site_df['concentration'])
+
+
+        # def safe_linreg(g):
+        #     try:
+        #         slope, intercept, *_ = linregress(g['log_mm'], g['log_Hg'])
+        #         return pd.Series({'slope': slope, 'intercept': intercept})
+        #     except ValueError as e:
+        #         print(f"Regression failed for site: {site}, month: {g.name}, reason: {e}")
+        #         return pd.Series({'slope': np.nan, 'intercept': np.nan})
+        #         # Step 1: Compute slope and intercept per month (across all years)
+        # monthly_models = (
+        #     site_df.groupby('month')
+        #     .apply(safe_linreg, include_groups=False)
+        # )
+
+        # monthly_models.index.name = 'month'
+        # monthly_models = monthly_models.reset_index()
+
+        # # store the original index
+        # original_index = site_df.index
+
+        # # Step 2: Map slope/intercept to each row based on month
+        # site_df = site_df.merge(monthly_models, on='month', how='left')
+
+        # # Restore datetime index
+        # site_df.index = original_index
+
+        # # Step 3: Compute predicted log(Hg), residuals, and weighted residuals
+        # site_df['log_Hg_pred'] = site_df['slope'] * site_df['log_mm'] + site_df['intercept']
+        # site_df['residual'] = site_df['log_Hg'] - site_df['log_Hg_pred']
+        # site_df['weighted_residual'] = site_df['residual'] * site_df['mm']
+
+        # # Map month numbers to 3-letter names
+        # month_map = {
+        #     1: 'residual_jan', 2: 'residual_feb', 3: 'residual_mar', 4: 'residual_apr',
+        #     5: 'residual_may', 6: 'residual_jun', 7: 'residual_jul', 8: 'residual_aug',
+        #     9: 'residual_sep', 10: 'residual_oct', 11: 'residual_nov', 12: 'residual_dec'
+        # }
+
+        # # Create a new column name for each row based on its month
+        # site_df['residual_col'] = site_df['month'].map(month_map)
+
+        # # Create wide-format DataFrame where each row has weighted_residual in the correct month column
+        # residual_wide = pd.pivot_table(
+        #     site_df[['weighted_residual', 'residual_col']],
+        #     index=site_df.index,
+        #     columns='residual_col',
+        #     values='weighted_residual'
+        # )
+
+        # # do a monthly average for each site for each year
+        # # Group by year and month, then take the average of weighted_residual
+        # monthly_avg = (
+        #     site_df
+        #     .groupby(['year', 'month'])['weighted_residual']
+        #     .mean()
+        #     .reset_index()
+        # )
+
+        # # Map numeric month to named columns
+        # monthly_avg['month_name'] = monthly_avg['month'].map(month_map)
+
+        # # Pivot to wide format: year as index, month columns as values
+        # monthly_avg_pivot = (
+        #     monthly_avg
+        #     .pivot(index='year', columns='month_name', values='weighted_residual')
+        #     .sort_index()
+        # )
+
+        # # (Optional) ensure all 12 columns are present in case some months are missing
+        # for col in month_map.values():
+        #     if col not in monthly_avg_pivot.columns:
+        #         monthly_avg_pivot[col] = np.nan
+
+        # # Reorder columns to ensure Jan–Dec order
+        # monthly_avg_pivot = monthly_avg_pivot[month_map.values()]
+        # monthly_avg_pivot = monthly_avg_pivot.reset_index()
+        # monthly_avg_pivot['year'] = monthly_avg_pivot['year'].astype(str)  # index now object/string
+        # monthly_avg_pivot.set_index('year', inplace=True)        
+
+        # mk_results = {} # set up a mk results dictionary
+
+        # for col in monthly_avg_pivot.columns:
+        #     series = monthly_avg_pivot[col].dropna()
+        #     if len(series) >= 3:
+        #         result = mk.original_test(series)
+        #         mk_results[col] = {
+        #             'slope': result.slope,
+        #             'p': result.p,
+        #             'trend': result.trend
+        #         }
+        #     else:
+        #         mk_results[col] = {
+        #             'slope': np.nan,
+        #             'p': np.nan,
+        #             'trend': 'insufficient'
+        #         }
+
+        # # Turn into DataFrame: rows = slope, p, trend
+        # mk_df = pd.DataFrame(mk_results) 
+
+        # # Reindex MK result so it becomes part of the same structure
+        # mk_df.index.name = 'year'  # mimic index name
+        # monthly_avg_pivot = pd.concat([monthly_avg_pivot, mk_df])
+
+        # # Join these new columns back to the original site_df
+        # site_df = pd.concat([site_df, residual_wide], axis=1)
+
+        # # save each site_df to file for examination
+        # site_df.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition_table_'+site+'.csv')
+        # monthly_avg_pivot.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition_MK_results_'+site+'.csv')
+    
+        def annual_stats_func(g):
+            mm_sum = g['mm'].sum()
+            weighted_avg = (g['concentration'] * g['mm']).sum() / mm_sum if mm_sum != 0 and not pd.isna(mm_sum) else np.nan
+            return pd.Series({
+                'wght_mn': weighted_avg,
+                'std_dev': g['concentration'].std(),
+                'min': g['concentration'].min(),
+                '05_p': g['concentration'].quantile(0.05),
+                '25_p': g['concentration'].quantile(0.25),
+                'med': g['concentration'].median(),
+                '75_p': g['concentration'].quantile(0.75),
+                '95_p': g['concentration'].quantile(0.95),
+                'max': g['concentration'].max()
+            })
+
+        
+        
+        def annual_plot_func(df, site):
+            if df['concentration'].dropna().empty or df['year'].nunique() < 2:
+                print(f"Skipping plot for {site}: not enough valid Hg data.")
+                return
+
+            fig, ax = plt.subplots(figsize=(10, 8))
+            df.boxplot(column='concentration', by='year', ax=ax)
+            plt.xticks(rotation=45)  # Rotate x-axis tick labels
+            plt.title(f'Annual Wet Deposition Boxplot for {site}')
+            plt.suptitle("")  # Remove the automatic 'Boxplot grouped by year' title
+            plt.xlabel('Year')
+            plt.ylabel('Hg Concentration (ng/L)')
+            plt.tight_layout()
+            out_path = rf'C:/Users/firanskib/OneDrive - EC-EC/mercury/Minamata_wet_deposition/annual_wet_dep_boxplot_{site}.png'
+            plt.savefig(out_path)
+            plt.close()
+
+        try:
+
+            # # Apply by year and month to assign monthly precip-weighted residual to each row
+            # monthly_df = site_df.groupby(['year', 'month'], group_keys=False).apply(monthly_weighted_residuals)
+            # site_df['year'] = site_df.index.year
+
+            # Annual stats
+            annual_stats = site_df.groupby('year').apply(annual_stats_func, include_groups=False)
+            deposition_stats_series = annual_stats.T.stack().reorder_levels([1, 0]).sort_index()
+            deposition_stats_series.index = [f"{year}_{stat}" for year, stat in deposition_stats_series.index]
+            deposition_stats_df = deposition_stats_series.to_frame().T
+            deposition_stats_df.index = [site]
+            all_site_stats.append(deposition_stats_df)
+
+            # Plot
+            # annual_plot_func(site_df, site)
+
+            # # set up a table of residuals for all the sites with datetime as the index
+            # resid_df = site_df['weighted_residual'].rename(site) # set up a temp dataframe
+            # residuals.append(resid_df) # append the dataframes horizontally
+
+
+
+
+        except Exception as e:
+            print(f"Failed for site {site}: {e}")
+
+    # Concatenate all sites into a full DataFrame
+    final_deposition_stats_df = pd.concat(all_site_stats)
+    print (final_deposition_stats_df.columns)
+    # save to file
+    final_deposition_stats_df.to_csv(r'C:/Users/firanskib/OneDrive - EC-EC/mercury/Minamata_wet_deposition/minamata_wet_deposition_stats.csv')
+
+
+def minamata_wet_dep_m_k_analysis():
+    mercury_df = pd.read_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition.csv') # don't index the first column yet
+
+    # clean up incorrect flags
+    mercury_df.loc[mercury_df['concentration']==-999.0,'flag'] = 'C'
+    mercury_df.loc[mercury_df['deposition']==-999.0,'flag'] = 'C'
+    mercury_df.loc[mercury_df['mm']==-999.0,'flag'] = 'C'
+    # filter out the missing entries to NaNs
+    mercury_df.loc[mercury_df['flag'].isin(['C',0.89,0.78,0.783]), ['mm','concentration','deposition']] = [np.nan,np.nan,np.nan]
+
+    # print(mercury_df.loc[mercury_df['mm'] < 0, ['datetime', 'mm']])
+    # print(mercury_df.loc[mercury_df['concentration'] < 0, ['datetime', 'deposition']])
     
     # # set a blank list of stats dataframes
-    # all_station_stats = []
+    # all_site_stats = []
 
     # Function to map month -> quarter
     def month_to_quarter(month):
@@ -1022,36 +1246,36 @@ def minamata_wet_dep_analysis():
 
     results = []
 
-    for station, station_df in mercury_df.groupby('station_name'):
-        print(station)
+    for site, site_df in mercury_df.groupby('site'):
+        print(site)
 
-        station_df = station_df.copy()
-        station_df.set_index('datetime', drop=True, inplace=True)
-        station_df.index = pd.to_datetime(station_df.index, errors='coerce')
-        station_df['month'] = station_df.index.month
-        station_df['year'] = station_df.index.year
-        station_df['quarter'] = station_df['month'].apply(month_to_quarter)
+        site_df = site_df.copy()
+        site_df.set_index('datetime', drop=True, inplace=True)
+        site_df.index = pd.to_datetime(site_df.index, errors='coerce')
+        site_df['month'] = site_df.index.month
+        site_df['year'] = site_df.index.year
+        site_df['quarter'] = site_df['month'].apply(month_to_quarter)
 
         # Skip if latest record before 2016
-        if station_df.index.max() < pd.Timestamp('2016-01-01'):
+        if site_df.index.max() < pd.Timestamp('2016-01-01'):
             continue
 
         # Skip if latest record before 2016
-        if station_df.index.max() < pd.Timestamp('2016-01-01'):
+        if site_df.index.max() < pd.Timestamp('2016-01-01'):
             continue
 
         # Calculate quarterly PWC (per year/quarter)
         pwc_quarterly = (
-            station_df.groupby(['year', 'quarter'])
-            .apply(lambda g: (g['Hg'] * g['mm']).sum() / g['mm'].sum() if g['mm'].sum() > 0 else np.nan,include_groups=False)
+            site_df.groupby(['year', 'quarter'])
+            .apply(lambda g: (g['concentration'] * g['mm']).sum() / g['mm'].sum() if g['mm'].sum() > 0 else np.nan,include_groups=False)
             .rename('pwc')
         ).reset_index()
 
-        station_df = station_df.merge(pwc_quarterly, on=['year', 'quarter'], how='left')
+        site_df = site_df.merge(pwc_quarterly, on=['year', 'quarter'], how='left')
 
         # Loop over each quarter
         for q in [1, 2, 3, 4]:
-            qdf = station_df[station_df['quarter'] == q].sort_index()
+            qdf = site_df[site_df['quarter'] == q].sort_index()
 
             if len(qdf) < 4:  # not enough data points
                 mm_slope = dep_slope = pwc_slope = np.nan
@@ -1066,12 +1290,12 @@ def minamata_wet_dep_analysis():
                     dep_slope, dep_trend = dep_res.slope, dep_res.trend
                     pwc_slope, pwc_trend = pwc_res.slope, pwc_res.trend
                 except Exception as e:
-                    print(f"  Error in MK for {station} Q{q}: {e}")
+                    print(f"  Error in MK for {site} Q{q}: {e}")
                     mm_slope = dep_slope = pwc_slope = np.nan
                     mm_trend = dep_trend = pwc_trend = None
 
             results.append({
-                'station': station,
+                'site': site,
                 'quarter': q,
                 'mm_slope': mm_slope,
                 'mm_trend': mm_trend,
@@ -1084,8 +1308,8 @@ def minamata_wet_dep_analysis():
     # Convert to DataFrame
     mk_results_df = pd.DataFrame(results)
 
-    # Pivot so each station has columns like mm_Q1_slope, mm_Q2_slope, etc.
-    mk_results_pivot = mk_results_df.pivot(index='station', columns='quarter')
+    # Pivot so each site has columns like mm_Q1_slope, mm_Q2_slope, etc.
+    mk_results_pivot = mk_results_df.pivot(index='site', columns='quarter')
     mk_results_pivot.columns = [f"{var}_Q{q}" for var, q in mk_results_pivot.columns]
     mk_results_pivot.reset_index(inplace=True)
 
@@ -1096,21 +1320,133 @@ def minamata_wet_dep_analysis():
 
 
                 # Apply by year and month to assign monthly precip-weighted residual to each row
-                # monthly_df = station_df.groupby(['year', 'month'], group_keys=False).apply(monthly_weighted_residuals)
-                # station_df['year'] = station_df.index.year
+                # monthly_df = site_df.groupby(['year', 'month'], group_keys=False).apply(monthly_weighted_residuals)
+                # site_df['year'] = site_df.index.year
 
                 # # Annual stats
-                # annual_stats = station_df.groupby('year').apply(annual_stats_func, include_groups=False)
+                # annual_stats = site_df.groupby('year').apply(annual_stats_func, include_groups=False)
                 # deposition_stats_series = annual_stats.T.stack().reorder_levels([1, 0]).sort_index()
                 # deposition_stats_series.index = [f"{year}_{stat}" for year, stat in deposition_stats_series.index]
                 # deposition_stats_df = deposition_stats_series.to_frame().T
-                # deposition_stats_df.index = [station]
-                # all_station_stats.append(deposition_stats_df)
+                # deposition_stats_df.index = [site]
+                # all_site_stats.append(deposition_stats_df)
 
                 # Plot
-                # annual_plot_func(station_df, station)
+                # annual_plot_func(site_df, site)
 
 
+def m_k_summary():
+    path = r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\M-K_wet_deposition_files\*MK*.csv'
+    path_list=glob.glob(path)
+    for path in path_list:
+        filename = os.path.basename(path)
+        prefix = "hgee_wet_deposition_MK_results_"
+        suffix = ".csv"
+        if filename.startswith(prefix) and filename.endswith(suffix):
+            site_name = filename[len(prefix):-len(suffix)]
+
+        # out path for fig saving
+        out_path = rf'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\M-K_wet_deposition_files\wet_dep_monthly_M-K_plot_{site_name}.png'
+
+
+        # load the dataframe
+        df = pd.read_csv(path, index_col=0)
+        if (df.loc['trend',:] == 'insufficient').sum() > 6:
+            print ('skipping ',site_name)
+            continue
+        else:
+            print ('plotting ',site_name)
+            slope_series = pd.to_numeric(df.loc['slope'], errors='coerce')
+            p_series = pd.to_numeric(df.loc['slope'], errors='coerce')
+            # Plotting
+            fig, ax = plt.subplots(figsize=(12, 6))
+
+            # X-axis labels: remove "residual_" prefix for clarity
+            months = [col.replace('residual_', '') for col in slope_series.index]
+
+            ax.bar(months, slope_series.values, color='skyblue', edgecolor='black')
+
+            # Annotate with p-values
+            for i, (month, val) in enumerate(slope_series.items()):
+                p_val = p_series[month]
+                    # Handle string values or non-numeric p-values
+                try:
+                    p_numeric = float(p_val)
+                    label = f"P: {p_numeric:.2f}"
+                except (ValueError, TypeError):
+                    label = "P: n/a"
+
+                # Position text above for positive bars, below for negative bars
+                offset = 8 if val >= 0 else -14
+                valign = 'bottom' if val >= 0 else 'top'
+
+                # annotate the bars with the P-value
+                ax.annotate(label, xy=(i, val), xytext=(0, offset),
+                            textcoords="offset points", ha='center', va=valign,
+                            fontsize=9, color='darkgreen')
+            
+            # Horizontal zero line
+            ax.axhline(0, color='gray', linestyle='--', linewidth=1)
+
+            # Formatting
+            ax.set_title(site_name+" Monthly M-K Mercury Trends with P-values", fontsize=14)
+            ax.set_xlabel("Month")
+            ax.set_ylabel("M-K Senn Slope (yr$^{-1}$)")
+            ax.axhline(0, color='gray', linestyle='--', linewidth=0.8)
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(out_path)
+            plt.close(fig)
+
+
+def m_k_clustering():
+    mk_df = pd.read_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\wet_dep_seasonal_M-K_results.csv')
+    # ipcc_df = pd.read_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_dep_sites_by_ipcc.csv')
+
+    # # --- Merge on site/site name ---
+    # mk_df = mk_df.merge(ipcc_df, on='site', how='inner')
+
+    # # Loop through quarters and compute correlations
+    # for q in range(1, 5):
+    #     dep_col = f"dep_trend_Q{q}"
+    #     pwc_col = f"pwc_trend_Q{q}"
+    #     corr_col = f"dep-pwc_correlation_Q{q}"
+
+    #     def compare_trends(row):
+    #         dep = str(row[dep_col]).strip().lower()
+    #         pwc = str(row[pwc_col]).strip().lower()
+
+    #         if dep == "no trend" or pwc == "no trend":
+    #             return "no correlation"
+    #         elif dep == pwc:
+    #             return "positive correlation"
+    #         else:
+    #             return "negative correlation"
+
+    #     mk_df[corr_col] = mk_df.apply(compare_trends, axis=1)
+
+    # # Sort by ipcc_region
+    # mk_df = mk_df.sort_values("ipcc_region")
+    # mk_df.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\wet_dep_seasonal_M-K_results.csv', index=False)
+
+    # Save or inspect
+    print(mk_df.head())
+
+    # --- Choose the trend column you want to test ---
+    # Example: test clustering for Q1 precip-weighted concentration slope
+    mk_df['trend_val'] = mk_df['pwc_slope_Q1']
+
+    # --- Convert to GeoDataFrame ---
+    gdf = gp.GeoDataFrame(df, geometry=gp.points_from_xy(mk_df['londecd'], mk_df['latdecd']), crs="EPSG:4326")
+
+    # --- Build spatial weights: k nearest neighbors ---
+    w = KNN.from_dataframe(gdf, k=3)
+    w.transform = 'R'  # row-standardize weights
+
+    # --- Run Moran's I ---
+    mi = Moran(gdf['trend_val'], w, permutations=999)
+    print(f"Moran's I: {mi.I}")
+    print(f"p-value: {mi.p_sim}")    
 
 def emissions_test():
     emissions_df = pd.read_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\test_edgar_emissions.csv')
@@ -1179,91 +1515,128 @@ def emissions_test():
     # export to file
     cv_pivot_with_coords.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\edgar_emissions_variance.csv') 
 
-def quick_pivot():
-    daily_df = pd.read_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_daily_air_export.csv', parse_dates=["date"])
+def deposition_update(sql_engine):
+    # Load deposition data
+    wet_dep_df = pd.read_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition.csv', index_col=0, parse_dates=[1])
+
+    # # Read the CSV and parse Start/Slut as datetime
+    # insert_df = pd.read_csv(
+    #     r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Data\EBAS\precip_data\european_files_john_munthe\Rao_shair-8105-3-1-1-hg.csv', sep=';',skiprows=12, usecols=['Start', 'Slut', 'precip_amount (2778)', 'Hg (2779)'], parse_dates=['Start', 'Slut'])
+    # print (insert_df.columns)
+
+    # # Step 1: Localize both datetimes to Swedish local time (CET/CEST = Europe/Stockholm)
+    # insert_df['Start'] = insert_df['Start'].dt.tz_localize("Europe/Stockholm", nonexistent="shift_forward", ambiguous="NaT")
+    # insert_df['Slut']  = insert_df['Slut'].dt.tz_localize("Europe/Stockholm", nonexistent="shift_forward", ambiguous="NaT")
+
+    # # Step 2: Convert to UTC
+    # insert_df['Start'] = insert_df['Start'].dt.tz_convert("UTC")
+    # insert_df['Slut']  = insert_df['Slut'].dt.tz_convert("UTC")
+
+    # # Step 3: Use 'Slut' as the UTC datetime index
+    # insert_df = insert_df.set_index('Slut', drop=False).rename_axis("datetime")
+
+    # # Step 1: Drop rows with missing precip or Hg values
+    # insert_df = insert_df.dropna(subset=['precip_amount (2778)', 'Hg (2779)'])
+
+    # # Step 2: Drop duplicate Start values, keeping the first valid row
+    # insert_df = insert_df.drop_duplicates(subset=['Start'], keep='first')
+
+    # # Step 3: Drop duplicate Slut values (the index), keeping the first valid row
+    # insert_df = insert_df[~insert_df.index.duplicated(keep='first')]
+
+    # insert_df['deposition'] = insert_df['precip_amount (2778)']*insert_df['Hg (2779)']
+
+    # insert_df.columns = ['start_dt','end_dt','mm','concentration','deposition']
+
+    # insert_df['flag_orig'] = 0
+
+    # insert_df['site'] = 'Råö'
+    # insert_df['country'] = 'Sweden'
+
+    # insert_df = insert_df.reindex(columns = ['site','country','start_dt','end_dt','mm','concentration','deposition','flag_orig'])
+
+    # insert_df.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\rao_2.csv')
+
+    # # print (wet_dep_df.columns)
+    # # wet_dep_df.drop(columns=['Unnamed: 0'], inplace=True)
+
+    # # print (wet_dep_df.head())
+
+    # # # Convert the index to datetime
+    # # wet_dep_df.index = pd.to_datetime(wet_dep_df.index, errors="coerce")
+
+    # # # If the timestamps are naive (no timezone info), localize them first:
+    # # wet_dep_df.index = wet_dep_df.index.tz_localize("UTC")
+
+    # # # Now you can convert if needed:
+    # # wet_dep_df.index = wet_dep_df.index.tz_convert("UTC")    
     
-    # Create a complete daily date range
-    full_index = pd.date_range(start="1995-01-01", end=pd.Timestamp.today().normalize(), freq="D")
+    # # wet_dep_df.index = wet_dep_df.index.date  # keep only the date
 
-    # Group by site and reindex each to the full date range
-    site_series = []
-    for site, group in daily_df.groupby("site"):
-        print (site)
-        s = group.set_index("date")["daily_avg"]
-        s = s.reindex(full_index)  # Align to full date range
-        s.name = site  # Set the name so it becomes a column label later
-        site_series.append(s)
+    # --- filter only Sweden rows ---
+    wet_dep_sweden = wet_dep_df[wet_dep_df["country"] == "Sweden"]
 
-    # Combine all series into a single DataFrame
-    pivot_df = pd.concat(site_series, axis=1)
+    # reindex the swedish sub_df
+    with open (r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\hgee_active_columns.csv','r') as f:
+        column_list=f.readlines()
+    column_list=[column.replace('\n','') for column in column_list]
 
-    # Final touches
-    pivot_df.index.name = "date"
-
-    pivot_df.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_daily_air_table.csv')
-
-def m_k_summary():
-    path = r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\M-K_wet_deposition_files\*MK*.csv'
-    path_list=glob.glob(path)
-    for path in path_list:
-        filename = os.path.basename(path)
-        prefix = "hgee_wet_deposition_MK_results_"
-        suffix = ".csv"
-        if filename.startswith(prefix) and filename.endswith(suffix):
-            station_name = filename[len(prefix):-len(suffix)]
-
-        # out path for fig saving
-        out_path = rf'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\M-K_wet_deposition_files\wet_dep_monthly_M-K_plot_{station_name}.png'
+    # reindex the rows
+    wet_dep_sweden.reset_index(inplace=True, names='datetime')
+    print (wet_dep_sweden.head())
 
 
-        # load the dataframe
-        df = pd.read_csv(path, index_col=0)
-        if (df.loc['trend',:] == 'insufficient').sum() > 6:
-            print ('skipping ',station_name)
-            continue
-        else:
-            print ('plotting ',station_name)
-            slope_series = pd.to_numeric(df.loc['slope'], errors='coerce')
-            p_series = pd.to_numeric(df.loc['slope'], errors='coerce')
-            # Plotting
-            fig, ax = plt.subplots(figsize=(12, 6))
+    # reindex the columns
+    wet_dep_sweden = wet_dep_sweden.reindex(columns=column_list)
 
-            # X-axis labels: remove "residual_" prefix for clarity
-            months = [col.replace('residual_', '') for col in slope_series.index]
+    wet_dep_sweden['species'] = 'total_mercury'
+    wet_dep_sweden['matrix'] = 'precip'
+    wet_dep_sweden['concentration_units'] = 'ng/l'
 
-            ax.bar(months, slope_series.values, color='skyblue', edgecolor='black')
+    wet_dep_sweden.loc[wet_dep_sweden['site']=='Bredkälen',['project','ipcc_region','latdecd','londecd']] = ['AMAP','N.Europe',63.85,15.333333]
+    wet_dep_sweden.loc[wet_dep_sweden['site']=='Hallahus',['project','ipcc_region','latdecd','londecd']] = ['EBAS','N.Europe',56.0429,13.148]
+    wet_dep_sweden.loc[wet_dep_sweden['site']=='Råö',['project','ipcc_region','latdecd','londecd']] = ['EBAS','N.Europe',57.394,11.914]
 
-            # Annotate with p-values
-            for i, (month, val) in enumerate(slope_series.items()):
-                p_val = p_series[month]
-                    # Handle string values or non-numeric p-values
+    print (wet_dep_sweden.head())
+
+    sites_to_update = ["Råö"]
+
+    # Reflect table
+    metadata = MetaData()
+    metadata.reflect(bind=sql_engine)
+    hgee_active = metadata.tables["hgee_active"]
+
+    with sql_engine.begin() as conn:
+        for row in wet_dep_sweden.itertuples(index=False):
+            if row.site in sites_to_update:
                 try:
-                    p_numeric = float(p_val)
-                    label = f"P: {p_numeric:.2f}"
-                except (ValueError, TypeError):
-                    label = "P: n/a"
+                    stmt = insert(hgee_active).values(
+                        datetime=row.datetime,
+                        start_dt=row.start_dt,
+                        end_dt=row.end_dt,
+                        project=row.project,
+                        ipcc_region=row.ipcc_region,
+                        unep_region=row.unep_region,
+                        country=row.country,
+                        site=row.site,
+                        latdecd=row.latdecd,
+                        londecd=row.londecd,
+                        method=row.method,
+                        species=row.species,
+                        concentration=row.concentration,
+                        concentration_units=row.concentration_units,
+                        deposition=row.deposition,
+                        deposition_units=row.deposition_units,
+                        flag_orig=row.flag_orig,
+                        flag_des=row.flag_des,
+                        matrix="precip"
+                    )
+                    conn.execute(stmt)
 
-                # Position text above for positive bars, below for negative bars
-                offset = 8 if val >= 0 else -14
-                valign = 'bottom' if val >= 0 else 'top'
+                except SQLAlchemyError as e:
+                    # Roll back just this failed insert (if needed)
+                    print(f"Error inserting row for site={row.site}, date={row.datetime}: {e}")
 
-                # annotate the bars with the P-value
-                ax.annotate(label, xy=(i, val), xytext=(0, offset),
-                            textcoords="offset points", ha='center', va=valign,
-                            fontsize=9, color='darkgreen')
-            
-            # Horizontal zero line
-            ax.axhline(0, color='gray', linestyle='--', linewidth=1)
-
-            # Formatting
-            ax.set_title(station_name+" Monthly M-K Mercury Trends with P-values", fontsize=14)
-            ax.set_xlabel("Month")
-            ax.set_ylabel("M-K Senn Slope (yr$^{-1}$)")
-            ax.axhline(0, color='gray', linestyle='--', linewidth=0.8)
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-            plt.savefig(out_path)
-            plt.close(fig)
 
 
 # # run the global average
@@ -1311,165 +1684,26 @@ def m_k_summary():
 # a comprehensive wet dep analysis code for merging separate ebas data files
 # ebas_precip_analysis_merge()
 
-# wet dep analysis code for all minamata data
-minamata_wet_dep_analysis()
+# wet dep stats function
+# minamata_wet_dep_stats()
+
+# wet dep seasonal m-k function
+minamata_wet_dep_m_k_analysis()
 
 # follow up on mk analysis for summary
 # m_k_summary()
 
+# spatial clustering of m-k trends
+# m_k_clustering()
+
 # run an emissions test
 # emissions_test()
+
+# insert deposition values into hgee_active wet dep
+# deposition_update(sql_engine)
 
 # do a pivot of data for M-K slope calculations
 # quick_pivot()
 
-        # # Pre-calculate log values
-        # station_df = station_df[(station_df['Hg'] > 0) & (station_df['mm'] > 0)]
-        # station_df['log_mm'] = np.log(station_df['mm'])
-        # station_df['log_Hg'] = np.log(station_df['Hg'])
 
 
-"""        def safe_linreg(g):
-            try:
-                slope, intercept, *_ = linregress(g['log_mm'], g['log_Hg'])
-                return pd.Series({'slope': slope, 'intercept': intercept})
-            except ValueError as e:
-                print(f"Regression failed for station: {station}, month: {g.name}, reason: {e}")
-                return pd.Series({'slope': np.nan, 'intercept': np.nan})
-                # Step 1: Compute slope and intercept per month (across all years)
-        monthly_models = (
-            station_df.groupby('month')
-            .apply(safe_linreg, include_groups=False)
-        )
-
-        monthly_models.index.name = 'month'
-        monthly_models = monthly_models.reset_index()
-
-        # store the original index
-        original_index = station_df.index
-
-        # Step 2: Map slope/intercept to each row based on month
-        station_df = station_df.merge(monthly_models, on='month', how='left')
-
-        # Restore datetime index
-        station_df.index = original_index
-
-        # Step 3: Compute predicted log(Hg), residuals, and weighted residuals
-        station_df['log_Hg_pred'] = station_df['slope'] * station_df['log_mm'] + station_df['intercept']
-        station_df['residual'] = station_df['log_Hg'] - station_df['log_Hg_pred']
-        station_df['weighted_residual'] = station_df['residual'] * station_df['mm']
-
-        # Map month numbers to 3-letter names
-        month_map = {
-            1: 'residual_jan', 2: 'residual_feb', 3: 'residual_mar', 4: 'residual_apr',
-            5: 'residual_may', 6: 'residual_jun', 7: 'residual_jul', 8: 'residual_aug',
-            9: 'residual_sep', 10: 'residual_oct', 11: 'residual_nov', 12: 'residual_dec'
-        }
-
-        # Create a new column name for each row based on its month
-        station_df['residual_col'] = station_df['month'].map(month_map)
-
-        # Create wide-format DataFrame where each row has weighted_residual in the correct month column
-        residual_wide = pd.pivot_table(
-            station_df[['weighted_residual', 'residual_col']],
-            index=station_df.index,
-            columns='residual_col',
-            values='weighted_residual'
-        )
-
-        # do a monthly average for each station for each year
-        # Group by year and month, then take the average of weighted_residual
-        monthly_avg = (
-            station_df
-            .groupby(['year', 'month'])['weighted_residual']
-            .mean()
-            .reset_index()
-        )
-
-        # Map numeric month to named columns
-        monthly_avg['month_name'] = monthly_avg['month'].map(month_map)
-
-        # Pivot to wide format: year as index, month columns as values
-        monthly_avg_pivot = (
-            monthly_avg
-            .pivot(index='year', columns='month_name', values='weighted_residual')
-            .sort_index()
-        )
-
-        # (Optional) ensure all 12 columns are present in case some months are missing
-        for col in month_map.values():
-            if col not in monthly_avg_pivot.columns:
-                monthly_avg_pivot[col] = np.nan
-
-        # Reorder columns to ensure Jan–Dec order
-        monthly_avg_pivot = monthly_avg_pivot[month_map.values()]
-        monthly_avg_pivot = monthly_avg_pivot.reset_index()
-        monthly_avg_pivot['year'] = monthly_avg_pivot['year'].astype(str)  # index now object/string
-        monthly_avg_pivot.set_index('year', inplace=True)        
-
-        mk_results = {} # set up a mk results dictionary
-
-        for col in monthly_avg_pivot.columns:
-            series = monthly_avg_pivot[col].dropna()
-            if len(series) >= 3:
-                result = mk.original_test(series)
-                mk_results[col] = {
-                    'slope': result.slope,
-                    'p': result.p,
-                    'trend': result.trend
-                }
-            else:
-                mk_results[col] = {
-                    'slope': np.nan,
-                    'p': np.nan,
-                    'trend': 'insufficient'
-                }
-
-        # Turn into DataFrame: rows = slope, p, trend
-        mk_df = pd.DataFrame(mk_results) 
-
-        # Reindex MK result so it becomes part of the same structure
-        mk_df.index.name = 'year'  # mimic index name
-        monthly_avg_pivot = pd.concat([monthly_avg_pivot, mk_df])
-
-        # Join these new columns back to the original station_df
-        station_df = pd.concat([station_df, residual_wide], axis=1)
-
-        # save each station_df to file for examination
-        station_df.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition_table_'+station+'.csv')
-        monthly_avg_pivot.to_csv(r'\\econm3hwvfsp008.ncr.int.ec.gc.ca\arqp_data\Projects\OnGoing\Mercury\HGEE-Minamata\Results and Plots\hgee_wet_deposition_MK_results_'+station+'.csv')
-    
-        def annual_stats_func(g):
-            mm_sum = g['mm'].sum()
-            weighted_avg = (g['Hg'] * g['mm']).sum() / mm_sum if mm_sum != 0 and not pd.isna(mm_sum) else np.nan
-            return pd.Series({
-                'wght_mn': weighted_avg,
-                'std_dev': g['Hg'].std(),
-                'min': g['Hg'].min(),
-                '05_p': g['Hg'].quantile(0.05),
-                '25_p': g['Hg'].quantile(0.25),
-                'med': g['Hg'].median(),
-                '75_p': g['Hg'].quantile(0.75),
-                '95_p': g['Hg'].quantile(0.95),
-                'max': g['Hg'].max()
-            })
-
-        
-        
-        def annual_plot_func(df, station):
-            if df['Hg'].dropna().empty or df['year'].nunique() < 2:
-                print(f"Skipping plot for {station}: not enough valid Hg data.")
-                return
-
-            fig, ax = plt.subplots(figsize=(10, 8))
-            df.boxplot(column='Hg', by='year', ax=ax)
-            plt.xticks(rotation=45)  # Rotate x-axis tick labels
-            plt.title(f'Annual Wet Deposition Boxplot for {station}')
-            plt.suptitle("")  # Remove the automatic 'Boxplot grouped by year' title
-            plt.xlabel('Year')
-            plt.ylabel('Hg Concentration (ng/L)')
-            plt.tight_layout()
-            out_path = rf'C:/Users/firanskib/OneDrive - EC-EC/mercury/Minamata_wet_deposition/annual_wet_dep_boxplot_{station}.png'
-            plt.savefig(out_path)
-            plt.close()
-"""
